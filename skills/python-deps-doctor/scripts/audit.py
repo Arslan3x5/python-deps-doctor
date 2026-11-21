@@ -2,8 +2,14 @@
 
 Standard library plus `packaging` (already installed with pip and pytest).
 """
+import argparse
+import json
+import platform
 import re
+import sys
+import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -143,3 +149,94 @@ def summarize(findings):
     for finding in findings:
         counts[finding.status] = counts.get(finding.status, 0) + 1
     return {status: counts[status] for status in SEVERITY if status in counts}
+
+PYPI = "https://pypi.org/pypi"
+
+
+def _get_json(url, timeout=10):
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.load(response)
+
+
+def fetch_info(name, pinned=None, get_json=_get_json):
+    """Ask PyPI for the latest version and the pinned version's Requires-Python.
+
+    Returns None when PyPI cannot be reached or does not know the package or version.
+    `get_json` is passed in so tests can use a fake and need no network.
+    """
+    try:
+        latest = get_json(f"{PYPI}/{name}/json")["info"]
+        info = {"latest": latest["version"], "requires_python": latest.get("requires_python")}
+        if pinned:
+            info["requires_python"] = get_json(f"{PYPI}/{name}/{pinned}/json")["info"].get("requires_python")
+        return info
+    except (OSError, ValueError, KeyError):  # network errors, bad JSON, missing fields
+        return None
+
+
+def find_requirements(project_dir):
+    """The requirements*.txt files in the project folder, sorted by name."""
+    return sorted(Path(project_dir).glob("requirements*.txt"))
+
+
+def read_requirements_text(path):
+    """Read a requirements file, including the UTF-16 files PowerShell's `pip freeze >` creates."""
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig")
+
+
+def analyze(path, python_version, fetch=fetch_info):
+    """Parse one requirements file and judge every dependency. Returns (findings, skipped)."""
+    deps, skipped = parse_requirements(read_requirements_text(path))
+    findings = [classify(dep, fetch(dep.name, dep.pinned), python_version) for dep in deps]
+    return findings, skipped
+
+
+def render_report(filename, findings, skipped, python_version):
+    """A Markdown report: summary, one table row per dependency (worst first), skipped lines."""
+    lines = [f"## {filename} (checked against Python {python_version})", ""]
+    summary = summarize(findings)
+    lines.append("Summary: " + (", ".join(f"{count} {status}" for status, count in summary.items()) or "no dependencies found"))
+    lines.append("")
+    if findings:
+        lines += ["| Package | Rule | Status | Detail |", "| --- | --- | --- | --- |"]
+        for f in sorted(findings, key=lambda f: (SEVERITY.index(f.status), f.dep.name)):
+            lines.append(f"| {f.dep.name} | {f.dep.specifier or '(none)'} | {f.status} | {f.detail} |")
+        lines.append("")
+    if skipped:
+        lines.append("Skipped lines:")
+        lines += [f"- line {number}: `{text}` ({reason})" for number, text, reason in skipped]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="audit.py", description="Audit requirements*.txt files.")
+    parser.add_argument("project", nargs="?", default=".", help="project folder (default: current folder)")
+    parser.add_argument("--python", default=platform.python_version(), help="Python version to check against (default: the running one)")
+    args = parser.parse_args(argv)
+
+    files = find_requirements(args.project)
+    if not files:
+        print(f"No requirements*.txt found in {args.project}")
+        return 2
+
+    cache = {}
+
+    def fetch(name, pinned):
+        if (name, pinned) not in cache:
+            cache[(name, pinned)] = fetch_info(name, pinned)
+        return cache[(name, pinned)]
+
+    problems = 0
+    for path in files:
+        findings, skipped = analyze(path, args.python, fetch)
+        print(render_report(path.name, findings, skipped, args.python))
+        problems += sum(1 for f in findings if f.status in ("incompatible", "outdated"))
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
