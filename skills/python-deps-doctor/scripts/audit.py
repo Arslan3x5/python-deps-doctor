@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 
 @dataclass
@@ -81,3 +83,63 @@ def parse_requirements(text):
             )
         )
     return deps, skipped
+
+# most serious first
+SEVERITY = ["incompatible", "outdated", "unknown", "unpinned", "range", "ok"]
+
+
+@dataclass
+class Finding:
+    dep: Dep
+    status: str  # one of SEVERITY
+    detail: str
+
+
+def supports_python(requires_python, python_version):
+    """True or False, or None when the package declares no readable Python requirement."""
+    if not requires_python:
+        return None
+    try:
+        return Version(python_version) in SpecifierSet(requires_python)
+    except (InvalidSpecifier, InvalidVersion):
+        return None
+
+
+def _newer(latest, pinned):
+    try:
+        return Version(latest) > Version(pinned)
+    except InvalidVersion:
+        return False
+
+
+def classify(dep, info, python_version):
+    """Judge one dependency.
+
+    `info` is what PyPI says: {"latest": "3.1.3", "requires_python": ">=3.9"}, where
+    requires_python belongs to the pinned version. Pass None if the lookup failed.
+    """
+    if info is None:
+        return Finding(dep, "unknown", "could not look up this package")
+    if dep.pinned:
+        required = info.get("requires_python")
+        if supports_python(required, python_version) is False:
+            return Finding(
+                dep,
+                "incompatible",
+                f"{dep.name}=={dep.pinned} requires Python {required}, but this is Python {python_version}",
+            )
+        latest = info.get("latest")
+        if latest and _newer(latest, dep.pinned):
+            return Finding(dep, "outdated", f"{dep.pinned} -> {latest}")
+        return Finding(dep, "ok", "pinned and up to date")
+    if not dep.specifier:
+        return Finding(dep, "unpinned", "no version rule, so installs are not reproducible")
+    return Finding(dep, "range", f"version range {dep.specifier}")
+
+
+def summarize(findings):
+    """Count findings per status, most serious first (zero counts are left out)."""
+    counts = {}
+    for finding in findings:
+        counts[finding.status] = counts.get(finding.status, 0) + 1
+    return {status: counts[status] for status in SEVERITY if status in counts}
