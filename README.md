@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" width="120" alt="Python Dependency Doctor logo"></p>
+
 # Python Dependency Doctor
 
 An agent skill plus a small standalone script that audit a Python project's
