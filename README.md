@@ -10,7 +10,7 @@ Pins rot quietly. `rembg==2.0.59`, for example, only supports Python 3.8 to 3.12
 so it fails to install on Python 3.14. This tool finds problems like that before
 they stop you, and the skill teaches an AI coding agent how to fix them safely.
 
-![Example report](docs/demo.png)
+![Example report](docs/Demo.png)
 
 ## What it checks
 
